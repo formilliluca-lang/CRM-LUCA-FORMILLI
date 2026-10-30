@@ -5,44 +5,41 @@ from datetime import datetime
 # Configurazione Pagina
 st.set_page_config(page_title="CRM Sinistri Condominiali", layout="wide", page_icon="🏢")
 
-# Inizializzazione Stato Sessione
+# Lista degli Amministratori accreditati
+AMMINISTRATORI = ["Studio Rossi", "Studio Bianchi", "Studio Verdi", "Studio De Rosa", "Gestione Condomini SRL"]
+
+# Inizializzazione Stato Sessione (Database Temporaneo)
 if "sinistri" not in st.session_state:
     st.session_state.sinistri = [
         {
             "id": "SIN-2026-001",
             "condominio": "Via Conca d'Oro 289",
             "amministratore": "Studio Rossi",
+            "polizza": "POL-992831",
             "danno": "Infiltrazione acqua da colonna di scarico principale",
             "stato": "Da aprire",
             "data": "2026-10-28",
-            "messaggi": [{"da": "Studio Rossi", "testo": "Segnalata perdita al 3° piano.", "ora": "10:15"}],
-            "nuovo_msg": True
+            "messaggi": [{"da": "Studio Rossi", "testo": "Segnalata perdita al 3° piano.", "ora": "10:15"}]
         },
         {
             "id": "SIN-2026-002",
             "condominio": "Via Properzio 4",
             "amministratore": "Studio Bianchi",
+            "polizza": "POL-104928",
             "danno": "Rottura cristallo portone d'ingresso",
             "stato": "In lavorazione",
             "data": "2026-10-25",
-            "messaggi": [{"da": "Broker", "testo": "Perito incaricato per il sopralluogo.", "ora": "15:30"}],
-            "nuovo_msg": False
-        },
-        {
-            "id": "SIN-2026-003",
-            "condominio": "Via Nomentana 120",
-            "amministratore": "Studio Rossi",
-            "danno": "Distacco intonaco cornicione balcone",
-            "stato": "Liquidata",
-            "data": "2026-10-10",
-            "messaggi": [{"da": "Broker", "testo": "Atto di liquidazione inviato al condominio.", "ora": "09:00"}],
-            "nuovo_msg": False
+            "messaggi": [{"da": "Broker", "testo": "Perito incaricato per il sopralluogo.", "ora": "15:30"}]
         }
     ]
 
-# Sidebar per cambio ruolo / login
-st.sidebar.title("🔐 Accesso CRM")
-ruolo = st.sidebar.radio("Seleziona Ruolo Utente:", ["Broker (Admin)", "Amministratore (Studio Rossi)"])
+# Sidebar per Accesso e Filtri
+st.sidebar.title("🔐 Accesso & Filtri")
+ruolo = st.sidebar.radio("Seleziona Ruolo Utente:", ["Broker (Admin)", "Amministratore"])
+
+admin_selezionato = None
+if ruolo == "Amministratore":
+    admin_selezionato = st.sidebar.selectbox("Seleziona il tuo Studio:", AMMINISTRATORI)
 
 st.title("🏢 Gestione Sinistri Condominiali")
 
@@ -51,7 +48,6 @@ da_aprire = sum(1 for s in st.session_state.sinistri if s["stato"] == "Da aprire
 in_lavorazione = sum(1 for s in st.session_state.sinistri if s["stato"] == "In lavorazione")
 liquidate = sum(1 for s in st.session_state.sinistri if s["stato"] == "Liquidata")
 
-# Metric Cards
 col1, col2, col3 = st.columns(3)
 col1.metric("🔴 DA APRIRE", da_aprire)
 col2.metric("🟠 IN LAVORAZIONE", in_lavorazione)
@@ -59,32 +55,76 @@ col3.metric("🟢 LIQUIDATE", liquidate)
 
 st.divider()
 
-# Tabelle o schede pratiche
-st.subheader("📋 Lista Pratiche Sinistri")
+# --- FORM DI INSERIMENTO NUOVA PRATICA ---
+with st.expander("➕ **INSERISCI NUOVA SEGNALAZIONE / PRATICA**", expanded=False):
+    st.subheader("Registra un nuovo sinistro")
+    with st.form("form_nuovo_sinistro", clear_on_submit=True):
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            nuovo_condominio = st.text_input("Indirizzo Condominio *", placeholder="Es. Via Nomentana 120")
+            nuovo_admin = st.selectbox("Amministratore di Riferimento *", AMMINISTRATORI)
+        with col_f2:
+            nuova_polizza = st.text_input("Numero Polizza (opzionale)", placeholder="Es. POL-883920")
+            data_evento = st.date_input("Data Evento / Segnalazione", datetime.now())
+        
+        descrizione_danno = st.text_area("Descrizione del Danno / Note Iniziali *", placeholder="Es. Rottura tubazione acqua calda bagno int. 4")
+        
+        btn_salva = st.form_submit_button("🚨 Salva e Invia Segnalazione (Stato: DA APRIRE)")
+        
+        if btn_salva:
+            if nuovo_condominio and descrizione_danno:
+                nuovo_id = f"SIN-2026-{len(st.session_state.sinistri) + 1:03d}"
+                nuova_pratica = {
+                    "id": nuovo_id,
+                    "condominio": nuovo_condominio,
+                    "amministratore": nuovo_admin if ruolo == "Broker (Admin)" else admin_selezionato,
+                    "polizza": nuova_polizza if nuova_polizza else "N/D",
+                    "danno": descrizione_danno,
+                    "stato": "Da aprire",
+                    "data": data_evento.strftime("%Y-%m-%d"),
+                    "messaggi": [{"da": ruolo, "testo": f"Pratica inserita: {descrizione_danno}", "ora": datetime.now().strftime("%H:%M")}]
+                }
+                st.session_state.sinistri.insert(0, nuova_pratica)
+                st.success(f"Pratica {nuovo_id} inserita con successo in stato DA APRIRE!")
+                st.rerun()
+            else:
+                st.error("Compila i campi obbligatori (Indirizzo e Descrizione Danno).")
+
+st.divider()
+
+# --- LISTA PRATICHE ---
+st.subheader("📋 Schede Pratiche Sinistri")
 
 for i, s in enumerate(st.session_state.sinistri):
-    # Filtro visibilità per Amministratore
-    if ruolo == "Amministratore (Studio Rossi)" and s["amministratore"] != "Studio Rossi":
+    # Filtro Visibilità Amministratore
+    if ruolo == "Amministratore" and s["amministratore"] != admin_selezionato:
         continue
 
-    # Colore badge
     badge = "🔴" if s["stato"] == "Da aprire" else ("🟠" if s["stato"] == "In lavorazione" else "🟢")
     
-    with st.expander(f"{badge} **{s['id']}** | {s['condominio']} — Status: **{s['stato'].upper()}**"):
+    with st.expander(f"{badge} **{s['id']}** | {s['condominio']} ({s['amministratore']}) — Status: **{s['stato'].upper()}**"):
         col_info, col_chat = st.columns([1, 1])
         
         with col_info:
             st.write(f"**Amministratore:** {s['amministratore']}")
+            st.write(f"**Polizza N°:** {s['polizza']}")
             st.write(f"**Data Segnalazione:** {s['data']}")
             st.write(f"**Descrizione Danno:** {s['danno']}")
             
-            # Cambio Stato (solo per Broker)
+            # Gestione Stato (Solo Broker)
             if ruolo == "Broker (Admin)":
+                st.divider()
+                st.write("⚙️ **Gestione Broker**")
                 nuovo_stato = st.selectbox("Modifica Stato Pratica:", ["Da aprire", "In lavorazione", "Liquidata"], 
                                            index=["Da aprire", "In lavorazione", "Liquidata"].index(s["stato"]),
                                            key=f"status_{i}")
                 if nuovo_stato != s["stato"]:
                     st.session_state.sinistri[i]["stato"] = nuovo_stato
+                    st.success(f"Stato aggiornato a: {nuovo_stato}")
+                    st.rerun()
+                
+                if st.button("🗑️ Elimina Pratica", key=f"del_{i}"):
+                    st.session_state.sinistri.pop(i)
                     st.rerun()
 
         with col_chat:
@@ -96,7 +136,7 @@ for i, s in enumerate(st.session_state.sinistri):
             if st.button("Invia Messaggio", key=f"btn_{i}"):
                 if nuovo_testo:
                     st.session_state.sinistri[i]["messaggi"].append({
-                        "da": "Broker" if ruolo == "Broker (Admin)" else "Studio Rossi",
+                        "da": "Broker" if ruolo == "Broker (Admin)" else admin_selezionato,
                         "testo": nuovo_testo,
                         "ora": datetime.now().strftime("%H:%M")
                     })
