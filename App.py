@@ -5,10 +5,11 @@ from datetime import datetime
 # Configurazione Pagina
 st.set_page_config(page_title="CRM Sinistri Condominiali", layout="wide", page_icon="🏢")
 
-# Lista degli Amministratori accreditati
-AMMINISTRATORI = ["Studio Rossi", "Studio Bianchi", "Studio Verdi", "Studio De Rosa", "Gestione Condomini SRL"]
+# Inizializzazione Lista Amministratori in Sessione
+if "amministratori" not in st.session_state:
+    st.session_state.amministratori = ["Studio Rossi", "Studio Bianchi", "Studio Verdi", "Studio De Rosa", "Gestione Condomini SRL"]
 
-# Inizializzazione Stato Sessione (Database Temporaneo)
+# Inizializzazione Pratiche Sinistri
 if "sinistri" not in st.session_state:
     st.session_state.sinistri = [
         {
@@ -39,7 +40,7 @@ ruolo = st.sidebar.radio("Seleziona Ruolo Utente:", ["Broker (Admin)", "Amminist
 
 admin_selezionato = None
 if ruolo == "Amministratore":
-    admin_selezionato = st.sidebar.selectbox("Seleziona il tuo Studio:", AMMINISTRATORI)
+    admin_selezionato = st.sidebar.selectbox("Seleziona il tuo Studio:", st.session_state.amministratori)
 
 st.title("🏢 Gestione Sinistri Condominiali")
 
@@ -58,37 +59,50 @@ st.divider()
 # --- FORM DI INSERIMENTO NUOVA PRATICA ---
 with st.expander("➕ **INSERISCI NUOVA SEGNALAZIONE / PRATICA**", expanded=False):
     st.subheader("Registra un nuovo sinistro")
-    with st.form("form_nuovo_sinistro", clear_on_submit=True):
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            nuovo_condominio = st.text_input("Indirizzo Condominio *", placeholder="Es. Via Nomentana 120")
-            nuovo_admin = st.selectbox("Amministratore di Riferimento *", AMMINISTRATORI)
-        with col_f2:
-            nuova_polizza = st.text_input("Numero Polizza (opzionale)", placeholder="Es. POL-883920")
-            data_evento = st.date_input("Data Evento / Segnalazione", datetime.now())
+    
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        nuovo_condominio = st.text_input("Indirizzo Condominio *", placeholder="Es. Via Nomentana 120")
         
-        descrizione_danno = st.text_area("Descrizione del Danno / Note Iniziali *", placeholder="Es. Rottura tubazione acqua calda bagno int. 4")
+        # Selezione o inserimento nuovo Amministratore
+        opzioni_admin = st.session_state.amministratori + ["➕ Aggiungi Nuovo Studio / Amministratore..."]
+        scelta_admin = st.selectbox("Amministratore di Riferimento *", opzioni_admin)
         
-        btn_salva = st.form_submit_button("🚨 Salva e Invia Segnalazione (Stato: DA APRIRE)")
-        
-        if btn_salva:
-            if nuovo_condominio and descrizione_danno:
-                nuovo_id = f"SIN-2026-{len(st.session_state.sinistri) + 1:03d}"
-                nuova_pratica = {
-                    "id": nuovo_id,
-                    "condominio": nuovo_condominio,
-                    "amministratore": nuovo_admin if ruolo == "Broker (Admin)" else admin_selezionato,
-                    "polizza": nuova_polizza if nuova_polizza else "N/D",
-                    "danno": descrizione_danno,
-                    "stato": "Da aprire",
-                    "data": data_evento.strftime("%Y-%m-%d"),
-                    "messaggi": [{"da": ruolo, "testo": f"Pratica inserita: {descrizione_danno}", "ora": datetime.now().strftime("%H:%M")}]
-                }
-                st.session_state.sinistri.insert(0, nuova_pratica)
-                st.success(f"Pratica {nuovo_id} inserita con successo in stato DA APRIRE!")
-                st.rerun()
-            else:
-                st.error("Compila i campi obbligatori (Indirizzo e Descrizione Danno).")
+        if scelta_admin == "➕ Aggiungi Nuovo Studio / Amministratore...":
+            nuovo_admin_nome = st.text_input("Inserisci Nome Nuovo Studio / Amministratore *", placeholder="Es. Studio Tecnico Romano")
+        else:
+            nuovo_admin_nome = scelta_admin
+
+    with col_f2:
+        nuova_polizza = st.text_input("Numero Polizza (opzionale)", placeholder="Es. POL-883920")
+        data_evento = st.date_input("Data Evento / Segnalazione", datetime.now())
+    
+    descrizione_danno = st.text_area("Descrizione del Danno / Note Iniziali *", placeholder="Es. Rottura tubazione acqua calda bagno int. 4")
+    
+    if st.button("🚨 Salva e Invia Segnalazione (Stato: DA APRIRE)", use_container_width=True):
+        if nuovo_condominio and descrizione_danno and nuovo_admin_nome:
+            # Se è un nuovo amministratore non in lista, lo salviamo
+            if nuovo_admin_nome not in st.session_state.amministratori:
+                st.session_state.amministratori.append(nuovo_admin_nome)
+            
+            admin_effettivo = nuovo_admin_nome if ruolo == "Broker (Admin)" else (admin_selezionato if admin_selezionato else nuovo_admin_nome)
+            
+            nuovo_id = f"SIN-2026-{len(st.session_state.sinistri) + 1:03d}"
+            nuova_pratica = {
+                "id": nuovo_id,
+                "condominio": nuovo_condominio,
+                "amministratore": admin_effettivo,
+                "polizza": nuova_polizza if nuova_polizza else "N/D",
+                "danno": descrizione_danno,
+                "stato": "Da aprire",
+                "data": data_evento.strftime("%Y-%m-%d"),
+                "messaggi": [{"da": ruolo, "testo": f"Pratica inserita: {descrizione_danno}", "ora": datetime.now().strftime("%H:%M")}]
+            }
+            st.session_state.sinistri.insert(0, nuova_pratica)
+            st.success(f"Pratica {nuovo_id} creata con successo per lo {admin_effettivo}!")
+            st.rerun()
+        else:
+            st.error("Compila i campi obbligatori (Indirizzo, Amministratore e Descrizione Danno).")
 
 st.divider()
 
