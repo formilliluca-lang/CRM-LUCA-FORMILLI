@@ -12,6 +12,22 @@ if "clienti" not in st.session_state:
 if "sinistri" not in st.session_state:
     st.session_state.sinistri = []
 
+# Gestione stato temporaneo per compilazione automatica da anagrafica
+if "precompila_studio" not in st.session_state:
+    st.session_state.precompila_studio = ""
+if "precompila_condominio" not in st.session_state:
+    st.session_state.precompila_condominio = ""
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "📋 Pratiche Sinistri"
+
+# Funzione per estrarre tutti i condomini già salvati
+def get_tutti_condomini():
+    condomini_dict = {} # {nome_condominio: nome_studio}
+    for studio, dati in st.session_state.clienti.items():
+        for c in dati.get("condomini", []):
+            condomini_dict[c] = studio
+    return condomini_dict
+
 # SIDEBAR PER ACCESSO E FILTRI
 st.sidebar.title("🔐 Accesso & Ruolo")
 ruolo = st.sidebar.radio("Seleziona Ruolo Utente:", ["Broker (Admin)", "Amministratore"])
@@ -46,23 +62,47 @@ tab_pratiche, tab_clienti = st.tabs(["📋 Pratiche Sinistri", "👥 Aggiungi / 
 # TAB 1: GESTIONE PRATICHE SINISTRI
 # ==========================================
 with tab_pratiche:
-    with st.expander("➕ **APRI NUOVA PRATICA SINISTRO**", expanded=True if len(st.session_state.sinistri) == 0 else False):
+    with st.expander("➕ **APRI NUOVA PRATICA SINISTRO**", expanded=True if (len(st.session_state.sinistri) == 0 or st.session_state.precompila_condominio != "") else False):
         st.subheader("Registrazione Nuova Pratica")
         
-        with st.form("form_nuova_pratica", clear_on_submit=True):
+        tutti_condomini = get_tutti_condomini()
+        lista_condomini_esistenti = sorted(list(tutti_condomini.keys()))
+        
+        # Opzioni per il menu a tendina dei condomini
+        opzioni_condomini = ["➕ Digita Nuovo Condominio..."] + lista_condomini_esistenti
+
+        # Gestione valori precompilati se proveniamo dal tasto "Apri Pratica" dell'anagrafica
+        index_cond_default = 0
+        if st.session_state.precompila_condominio in lista_condomini_esistenti:
+            index_cond_default = opzioni_condomini.index(st.session_state.precompila_condominio)
+
+        scelta_cond_select = st.selectbox(
+            "Seleziona Condominio Esistente (o sceglilo da elenco) *", 
+            opzioni_condomini, 
+            index=index_cond_default,
+            key="select_cond_pratica"
+        )
+
+        # Determinazione automatica o manuale di Indirizzo e Studio
+        if scelta_cond_select != "➕ Digita Nuovo Condominio...":
+            condominio_final_input = scelta_cond_select
+            studio_suggerito = tutti_condomini.get(scelta_cond_select, "")
+        else:
+            condominio_final_input = st.text_input("Digita Indirizzo Nuovo Condominio *", value=st.session_state.precompila_condominio, placeholder="Es. Via Conca d'Oro 289")
+            studio_suggerito = st.session_state.precompila_studio
+
+        with st.form("form_nuova_pratica", clear_on_submit=False):
             col_p1, col_p2 = st.columns(2)
             
             with col_p1:
-                studio_pratica = st.text_input("Nome Studio / Amministratore *", placeholder="Es. Studio Rossi")
-                condominio_pratica = st.text_input("Indirizzo Condominio *", placeholder="Es. Via Conca d'Oro 289")
+                studio_pratica = st.text_input("Nome Studio / Amministratore *", value=studio_suggerito, placeholder="Es. Studio Rossi")
+                condominio_pratica = st.text_input("Indirizzo Condominio Confermato *", value=condominio_final_input)
 
             with col_p2:
                 numero_polizza = st.text_input("Numero Polizza (opzionale)", placeholder="Es. POL-992831")
                 data_evento = st.date_input("Data Evento / Segnalazione", datetime.now())
 
             descrizione_danno = st.text_area("Descrizione del Danno / Note Iniziali *", placeholder="Es. Infiltrazione acqua da colonna di scarico principale")
-            
-            # Allegato file iniziale
             file_allegato_iniziale = st.file_uploader("Allegato iniziale (Foto, Perizia, Preventivo, PDF)", type=["pdf", "png", "jpg", "jpeg"])
 
             btn_salva_pratica = st.form_submit_button("🚨 Salva e Apri Pratica (Stato: DA APRIRE)", use_container_width=True)
@@ -72,7 +112,7 @@ with tab_pratiche:
                 cond_clean = condominio_pratica.strip() if condominio_pratica else ""
 
                 if studio_clean and cond_clean and descrizione_danno:
-                    # Registra lo studio e il condominio in anagrafica se non esistono
+                    # Registra lo studio e il condominio in anagrafica se non esistono ancora
                     if studio_clean not in st.session_state.clienti:
                         st.session_state.clienti[studio_clean] = {"telefono": "N/D", "email": "N/D", "condomini": [cond_clean]}
                     elif cond_clean not in st.session_state.clienti[studio_clean]["condomini"]:
@@ -95,6 +135,11 @@ with tab_pratiche:
                         "messaggi": [{"da": ruolo, "testo": f"Pratica creata: {descrizione_danno}", "ora": datetime.now().strftime("%H:%M")}]
                     }
                     st.session_state.sinistri.insert(0, nuova_pratica)
+                    
+                    # Reset precompilazione
+                    st.session_state.precompila_studio = ""
+                    st.session_state.precompila_condominio = ""
+                    
                     st.success(f"Pratica {nuovo_id} aperta con successo per {cond_clean} ({studio_clean})!")
                     st.rerun()
                 else:
@@ -102,7 +147,7 @@ with tab_pratiche:
 
     st.divider()
     
-    # ELENCO PRATICI
+    # ELENCO PRATICHE
     st.subheader("📋 Lista Pratiche")
     if not st.session_state.sinistri:
         st.info("Nessuna pratica presente.")
@@ -198,7 +243,7 @@ with tab_clienti:
 
     st.divider()
 
-    # ELENCO E DETTAGLIO CLIENTI
+    # ELENCO E DETTAGLIO CLIENTI CON TASTO APERTURA PRATICA DIRETTA
     st.subheader("🏢 Anagrafica Clienti & Condomini")
     
     if not st.session_state.clienti:
@@ -212,8 +257,17 @@ with tab_clienti:
                 if not dati["condomini"]:
                     st.caption("Nessun condominio ancora collegato a questo studio.")
                 else:
-                    for cond in dati["condomini"]:
-                        st.markdown(f"- 📍 **{cond}**")
+                    for idx_c, cond in enumerate(dati["condomini"]):
+                        col_cond1, col_cond2 = st.columns([3, 1])
+                        with col_cond1:
+                            st.markdown(f"📍 **{cond}**")
+                        with col_cond2:
+                            # Pulsante per aprire direttamente la pratica associata
+                            if st.button(f"🚨 Apri Pratica", key=f"btn_apri_{studio}_{idx_c}"):
+                                st.session_state.precompila_studio = studio
+                                st.session_state.precompila_condominio = cond
+                                st.success(f"Condominio '{cond}' selezionato! Vai alla scheda 'Pratiche Sinistri' per completare.")
+                                st.rerun()
 
                 st.divider()
                 with st.form(f"form_add_cond_{studio}", clear_on_submit=True):
