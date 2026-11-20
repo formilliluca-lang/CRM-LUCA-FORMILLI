@@ -1,282 +1,242 @@
 import streamlit as st
 import pandas as pd
+from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
+import uuid
 
-# Configurazione Pagina
-st.set_page_config(page_title="CRM Sinistri Condominiali", layout="wide", page_icon="🏢")
+st.set_page_config(
+    page_title="CRM Sinistri & Clienti",
+    page_icon="🏢",
+    layout="wide"
+)
 
-# 1. INIZIALIZZAZIONE STRUTTURA DATI (Memoria Sessione)
-if "clienti" not in st.session_state:
-    st.session_state.clienti = {}
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-if "sinistri" not in st.session_state:
-    st.session_state.sinistri = []
+# Colonne esatte del tuo file CRM_sinistri_database
+COLS_CLIENTI = ["nome", "telefono", "email", "condomini"]
+COLS_SINISTRI = ["id", "condominio", "amministratore", "polizza", "danno", "stato", "data", "allegati", "messaggi"]
 
-# Gestione stato temporaneo per compilazione automatica da anagrafica
-if "precompila_studio" not in st.session_state:
-    st.session_state.precompila_studio = ""
-if "precompila_condominio" not in st.session_state:
-    st.session_state.precompila_condominio = ""
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "📋 Pratiche Sinistri"
+def leggi_dati(foglio: str, colonne: list) -> pd.DataFrame:
+    try:
+        df = conn.read(worksheet=foglio, ttl="0s")
+        # Pulisce eventuali spazi extra nei nomi delle colonne (es. "condominio " -> "condominio")
+        df.columns = [c.strip() for c in df.columns]
+        if df.empty:
+            return pd.DataFrame(columns=colonne)
+        df = df.dropna(how="all")
+        for col in colonne:
+            if col not in df.columns:
+                df[col] = ""
+        return df[colonne]
+    except Exception as e:
+        st.error(f"Errore lettura foglio '{foglio}': {e}")
+        return pd.DataFrame(columns=colonne)
 
-# Funzione per estrarre tutti i condomini già salvati
-def get_tutti_condomini():
-    condomini_dict = {} # {nome_condominio: nome_studio}
-    for studio, dati in st.session_state.clienti.items():
-        for c in dati.get("condomini", []):
-            condomini_dict[c] = studio
-    return condomini_dict
+def salva_dati(foglio: str, df: pd.DataFrame):
+    try:
+        conn.update(worksheet=foglio, data=df)
+        st.cache_data.clear()
+    except Exception as e:
+        st.error(f"Errore salvataggio su '{foglio}': {e}")
+        st.stop()
 
-# SIDEBAR PER ACCESSO E FILTRI
-st.sidebar.title("🔐 Accesso & Ruolo")
-ruolo = st.sidebar.radio("Seleziona Ruolo Utente:", ["Broker (Admin)", "Amministratore"])
+# Caricamento dati permanenti dal tuo foglio Google
+df_clienti = leggi_dati("clienti", COLS_CLIENTI)
+df_sinistri = leggi_dati("sinistri", COLS_SINISTRI)
 
-admin_selezionato = None
-lista_studi = sorted(list(st.session_state.clienti.keys()))
+# --- SIDEBAR ---
+st.sidebar.title("🏢 CRM Sinistri")
+menu = st.sidebar.radio(
+    "Menu",
+    ["📂 Schede Clienti & Sinistri", "➕ Nuova Scheda Cliente / Studio", "📋 Tutti i Sinistri"]
+)
 
-if ruolo == "Amministratore":
-    if lista_studi:
-        admin_selezionato = st.sidebar.selectbox("Seleziona il tuo Studio:", lista_studi)
-    else:
-        st.sidebar.warning("Nessuno studio cliente registrato.")
-
-st.title("🏢 CRM Sinistri & Anagrafica Condomini")
-
-# KPI IN ALTO
-da_aprire = sum(1 for s in st.session_state.sinistri if s["stato"] == "Da aprire")
-in_lavorazione = sum(1 for s in st.session_state.sinistri if s["stato"] == "In lavorazione")
-liquidate = sum(1 for s in st.session_state.sinistri if s["stato"] == "Liquidata")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("🔴 DA APRIRE", da_aprire)
-col2.metric("🟠 IN LAVORAZIONE", in_lavorazione)
-col3.metric("🟢 LIQUIDATE", liquidate)
-
-st.divider()
-
-# SCHEDE DI NAVIGAZIONE
-tab_pratiche, tab_clienti = st.tabs(["📋 Pratiche Sinistri", "👥 Aggiungi / Gestisci Cliente e Condomini"])
-
-# ==========================================
-# TAB 1: GESTIONE PRATICHE SINISTRI
-# ==========================================
-with tab_pratiche:
-    with st.expander("➕ **APRI NUOVA PRATICA SINISTRO**", expanded=True if (len(st.session_state.sinistri) == 0 or st.session_state.precompila_condominio != "") else False):
-        st.subheader("Registrazione Nuova Pratica")
-        
-        tutti_condomini = get_tutti_condomini()
-        lista_condomini_esistenti = sorted(list(tutti_condomini.keys()))
-        
-        # Opzioni per il menu a tendina dei condomini
-        opzioni_condomini = ["➕ Digita Nuovo Condominio..."] + lista_condomini_esistenti
-
-        # Gestione valori precompilati se proveniamo dal tasto "Apri Pratica" dell'anagrafica
-        index_cond_default = 0
-        if st.session_state.precompila_condominio in lista_condomini_esistenti:
-            index_cond_default = opzioni_condomini.index(st.session_state.precompila_condominio)
-
-        scelta_cond_select = st.selectbox(
-            "Seleziona Condominio Esistente (o sceglilo da elenco) *", 
-            opzioni_condomini, 
-            index=index_cond_default,
-            key="select_cond_pratica"
-        )
-
-        # Determinazione automatica o manuale di Indirizzo e Studio
-        if scelta_cond_select != "➕ Digita Nuovo Condominio...":
-            condominio_final_input = scelta_cond_select
-            studio_suggerito = tutti_condomini.get(scelta_cond_select, "")
-        else:
-            condominio_final_input = st.text_input("Digita Indirizzo Nuovo Condominio *", value=st.session_state.precompila_condominio, placeholder="Es. Via Conca d'Oro 289")
-            studio_suggerito = st.session_state.precompila_studio
-
-        with st.form("form_nuova_pratica", clear_on_submit=False):
-            col_p1, col_p2 = st.columns(2)
-            
-            with col_p1:
-                studio_pratica = st.text_input("Nome Studio / Amministratore *", value=studio_suggerito, placeholder="Es. Studio Rossi")
-                condominio_pratica = st.text_input("Indirizzo Condominio Confermato *", value=condominio_final_input)
-
-            with col_p2:
-                numero_polizza = st.text_input("Numero Polizza (opzionale)", placeholder="Es. POL-992831")
-                data_evento = st.date_input("Data Evento / Segnalazione", datetime.now())
-
-            descrizione_danno = st.text_area("Descrizione del Danno / Note Iniziali *", placeholder="Es. Infiltrazione acqua da colonna di scarico principale")
-            file_allegato_iniziale = st.file_uploader("Allegato iniziale (Foto, Perizia, Preventivo, PDF)", type=["pdf", "png", "jpg", "jpeg"])
-
-            btn_salva_pratica = st.form_submit_button("🚨 Salva e Apri Pratica (Stato: DA APRIRE)", use_container_width=True)
-            
-            if btn_salva_pratica:
-                studio_clean = studio_pratica.strip() if studio_pratica else ""
-                cond_clean = condominio_pratica.strip() if condominio_pratica else ""
-
-                if studio_clean and cond_clean and descrizione_danno:
-                    # Registra lo studio e il condominio in anagrafica se non esistono ancora
-                    if studio_clean not in st.session_state.clienti:
-                        st.session_state.clienti[studio_clean] = {"telefono": "N/D", "email": "N/D", "condomini": [cond_clean]}
-                    elif cond_clean not in st.session_state.clienti[studio_clean]["condomini"]:
-                        st.session_state.clienti[studio_clean]["condomini"].append(cond_clean)
-
-                    allegati_list = []
-                    if file_allegato_iniziale is not None:
-                        allegati_list.append(file_allegato_iniziale.name)
-
-                    nuovo_id = f"SIN-2026-{len(st.session_state.sinistri) + 1:03d}"
-                    nuova_pratica = {
-                        "id": nuovo_id,
-                        "condominio": cond_clean,
-                        "amministratore": studio_clean,
-                        "polizza": numero_polizza if numero_polizza else "N/D",
-                        "danno": descrizione_danno,
-                        "stato": "Da aprire",
-                        "data": data_evento.strftime("%Y-%m-%d"),
-                        "allegati": allegati_list,
-                        "messaggi": [{"da": ruolo, "testo": f"Pratica creata: {descrizione_danno}", "ora": datetime.now().strftime("%H:%M")}]
-                    }
-                    st.session_state.sinistri.insert(0, nuova_pratica)
-                    
-                    # Reset precompilazione
-                    st.session_state.precompila_studio = ""
-                    st.session_state.precompila_condominio = ""
-                    
-                    st.success(f"Pratica {nuovo_id} aperta con successo per {cond_clean} ({studio_clean})!")
-                    st.rerun()
-                else:
-                    st.error("Compila i campi obbligatori: Studio, Condominio e Descrizione Danno.")
-
-    st.divider()
+# =========================================================
+# 1. CREA NUOVA SCHEDA CLIENTE / AMMINISTRATORE
+# =========================================================
+if menu == "➕ Nuova Scheda Cliente / Studio":
+    st.title("➕ Nuova Scheda Cliente / Amministratore")
+    st.caption("I dati vengono salvati nella scheda 'clienti' di CRM_sinistri_database.")
     
-    # ELENCO PRATICHE
-    st.subheader("📋 Lista Pratiche")
-    if not st.session_state.sinistri:
-        st.info("Nessuna pratica presente.")
-    else:
-        for i, s in enumerate(st.session_state.sinistri):
-            if ruolo == "Amministratore" and admin_selezionato and s["amministratore"] != admin_selezionato:
-                continue
-
-            badge = "🔴" if s["stato"] == "Da aprire" else ("🟠" if s["stato"] == "In lavorazione" else "🟢")
-            with st.expander(f"{badge} **{s['id']}** | {s['condominio']} ({s['amministratore']}) — Status: **{s['stato'].upper()}**"):
-                col_i1, col_i2 = st.columns(2)
-                with col_i1:
-                    st.write(f"**Amministratore:** {s['amministratore']}")
-                    st.write(f"**Polizza N°:** {s['polizza']}")
-                    st.write(f"**Data:** {s['data']}")
-                    st.write(f"**Danno:** {s['danno']}")
-
-                    st.write("📎 **File e Allegati Pratica:**")
-                    if "allegati" in s and s["allegati"]:
-                        for f_name in s["allegati"]:
-                            st.caption(f"📄 {f_name}")
-                    else:
-                        st.caption("Nessun allegato presente.")
-
-                    if ruolo == "Broker (Admin)":
-                        st.divider()
-                        nuovo_st = st.selectbox("Modifica Stato:", ["Da aprire", "In lavorazione", "Liquidata"],
-                                                index=["Da aprire", "In lavorazione", "Liquidata"].index(s["stato"]), key=f"st_{i}")
-                        if nuovo_st != s["stato"]:
-                            st.session_state.sinistri[i]["stato"] = nuovo_st
-                            st.rerun()
-                        if st.button("🗑️ Elimina Pratica", key=f"del_{i}"):
-                            st.session_state.sinistri.pop(i)
-                            st.rerun()
-
-                with col_i2:
-                    st.write("💬 **Messaggi & Documenti**")
-                    for msg in s["messaggi"]:
-                        st.caption(f"**{msg['da']}** ({msg['ora']}): {msg['testo']}")
-                    
-                    nuovo_msg = st.text_input("Scrivi messaggio...", key=f"in_{i}")
-                    nuovo_file_chat = st.file_uploader("Allega file al messaggio", type=["pdf", "png", "jpg", "jpeg"], key=f"file_chat_{i}")
-                    
-                    if st.button("Invia Messaggio / File", key=f"btn_{i}"):
-                        if nuovo_msg or nuovo_file_chat is not None:
-                            testo_completo = nuovo_msg if nuovo_msg else ""
-                            if nuovo_file_chat is not None:
-                                nome_f = nuovo_file_chat.name
-                                if "allegati" not in s:
-                                    st.session_state.sinistri[i]["allegati"] = []
-                                st.session_state.sinistri[i]["allegati"].append(nome_f)
-                                testo_completo += f" [File allegato: {nome_f}]"
-
-                            st.session_state.sinistri[i]["messaggi"].append({
-                                "da": "Broker" if ruolo == "Broker (Admin)" else (admin_selezionato if admin_selezionato else "Cliente"),
-                                "testo": testo_completo.strip(),
-                                "ora": datetime.now().strftime("%H:%M")
-                            })
-                            st.rerun()
-
-# ==========================================
-# TAB 2: AGGIUNGI / GESTISCI CLIENTE E CONDOMINI
-# ==========================================
-with tab_clienti:
-    st.subheader("👤 Registra Nuovo Cliente / Amministratore")
-    
-    with st.form("form_nuovo_cliente_tab", clear_on_submit=True):
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            nome_cliente = st.text_input("Nome Studio / Amministratore *", placeholder="Es. Studio Tecnico Rossi")
-            telefono_cliente = st.text_input("Telefono / Cellulare", placeholder="Es. 06 1234567")
-        with col_c2:
-            email_cliente = st.text_input("Email / PEC", placeholder="Es. studio@rossiamministrazioni.it")
-            primo_condominio = st.text_input("Primo Condominio da associare (opzionale)", placeholder="Es. Via Conca d'Oro 289")
-
-        btn_salva_cli = st.form_submit_button("💾 Salva Scheda Cliente")
-
-        if btn_salva_cli:
-            if nome_cliente:
-                nome_clean = nome_cliente.strip()
-                if nome_clean not in st.session_state.clienti:
-                    st.session_state.clienti[nome_clean] = {
-                        "telefono": telefono_cliente if telefono_cliente else "N/D",
-                        "email": email_cliente if email_cliente else "N/D",
-                        "condomini": [primo_condominio.strip()] if primo_condominio else []
-                    }
-                    st.success(f"Cliente '{nome_clean}' inserito con successo!")
-                    st.rerun()
-                else:
-                    st.warning("Questo Studio/Cliente è già presente in anagrafica.")
+    with st.form("form_nuovo_cliente", clear_on_submit=True):
+        nome = st.text_input("Nome Amministratore / Studio *")
+        telefono = st.text_input("Telefono")
+        email = st.text_input("Email")
+        condomini = st.text_area("Condomini Gestiti (separati da virgola, es. Via Po 12, Via Leutari 28)")
+        
+        if st.form_submit_button("💾 Salva Scheda Cliente"):
+            if not nome.strip():
+                st.error("Inserisci il nome del cliente/amministratore.")
             else:
-                st.error("Inserisci il Nome dello Studio / Amministratore.")
+                nuovo_cliente = pd.DataFrame([{
+                    "nome": nome.strip(),
+                    "telefono": telefono.strip(),
+                    "email": email.strip(),
+                    "condomini": condomini.strip()
+                }])
+                df_agg = pd.concat([df_clienti, nuovo_cliente], ignore_index=True)
+                salva_dati("clienti", df_agg)
+                st.success(f"Scheda '{nome}' salvata permanentemente su Google Sheets!")
+                st.rerun()
 
-    st.divider()
-
-    # ELENCO E DETTAGLIO CLIENTI CON TASTO APERTURA PRATICA DIRETTA
-    st.subheader("🏢 Anagrafica Clienti & Condomini")
+# =========================================================
+# 2. SCHEDE CLIENTI E SOTTO-SCHEDE SINISTRI
+# =========================================================
+elif menu == "📂 Schede Clienti & Sinistri":
+    st.title("📂 Schede Clienti & Sotto-Schede Sinistri")
     
-    if not st.session_state.clienti:
-        st.info("Nessun cliente in anagrafica.")
-    else:
-        for studio, dati in st.session_state.clienti.items():
-            with st.expander(f"👤 **{studio}** | 📞 {dati['telefono']} | ✉️ {dati['email']}"):
-                st.write(f"**Telefono:** {dati['telefono']} | **Email:** {dati['email']}")
-                st.write("🏢 **Condomini Gestiti:**")
+    if df_clienti.empty:
+        st.info("Nessun cliente ancora in archivio. Vai su '➕ Nuova Scheda Cliente / Studio' per inserire il primo.")
+        st.stop()
 
-                if not dati["condomini"]:
-                    st.caption("Nessun condominio ancora collegato a questo studio.")
+    lista_clienti = df_clienti["nome"].dropna().tolist()
+    cliente_scelto = st.sidebar.selectbox("Seleziona Scheda Cliente:", lista_clienti)
+    
+    idx_cli = df_clienti[df_clienti["nome"] == cliente_scelto].index[0]
+    dati_cli = df_clienti.loc[idx_cli]
+
+    # Box Anagrafica Cliente (modificabile)
+    with st.expander(f"👤 Scheda Anagrafica: {dati_cli['nome']}", expanded=True):
+        with st.form("modifica_cliente"):
+            c1, c2 = st.columns(2)
+            tel_mod = c1.text_input("Telefono", value=str(dati_cli["telefono"]) if pd.notna(dati_cli["telefono"]) else "")
+            email_mod = c2.text_input("Email", value=str(dati_cli["email"]) if pd.notna(dati_cli["email"]) else "")
+            cond_mod = st.text_area("Elenco Condomini", value=str(dati_cli["condomini"]) if pd.notna(dati_cli["condomini"]) else "")
+            
+            if st.form_submit_button("💾 Aggiorna Dati Cliente"):
+                df_clienti.at[idx_cli, "telefono"] = tel_mod
+                df_clienti.at[idx_cli, "email"] = email_mod
+                df_clienti.at[idx_cli, "condomini"] = cond_mod
+                salva_dati("clienti", df_clienti)
+                st.success("Dati cliente aggiornati su Google Sheets!")
+                st.rerun()
+
+    st.markdown("---")
+    
+    tab_sottoschede, tab_nuovo_sx = st.tabs([
+        "📑 Sotto-Schede Sinistri del Cliente",
+        "➕ Apri Nuovo Sinistro per questo Cliente"
+    ])
+
+    # TAB A: SOTTO-SCHEDE SINISTRI DEL CLIENTE
+    with tab_sottoschede:
+        sinistri_cli = df_sinistri[df_sinistri["amministratore"].astype(str).str.strip() == cliente_scelto.strip()]
+        
+        if sinistri_cli.empty:
+            st.info(f"Nessun sinistro registrato per {cliente_scelto}.")
+        else:
+            st.dataframe(
+                sinistri_cli[["id", "condominio", "polizza", "danno", "stato", "data"]],
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.subheader("🔍 Apri Dettaglio Sotto-Scheda")
+            opzioni_sx = {
+                f"{r['id']} - {r['condominio']} ({r['stato']})": r["id"]
+                for _, r in sinistri_cli.iterrows()
+            }
+            sx_label = st.selectbox("Seleziona Sinistro:", list(opzioni_sx.keys()))
+            id_sx = opzioni_sx[sx_label]
+            
+            idx_sx = df_sinistri[df_sinistri["id"] == id_sx].index[0]
+            dati_sx = df_sinistri.loc[idx_sx]
+
+            with st.container(border=True):
+                st.markdown(f"#### Pratica: `{id_sx}` — Condominio: **{dati_sx['condominio']}**")
+                
+                col_a, col_b = st.columns(2)
+                stati = ["Inviata", "Aperta", "In lavorazione", "Perizia fissata", "Liquidata", "Chiusa / Senza seguito"]
+                stato_att = str(dati_sx["stato"]).strip() if pd.notna(dati_sx["stato"]) else "Aperta"
+                idx_st = stati.index(stato_att) if stato_att in stati else 0
+                
+                nuovo_stato = col_a.selectbox("Stato Pratica", stati, index=idx_st)
+                nuova_polizza = col_a.text_input("Numero Polizza", value=str(dati_sx["polizza"]) if pd.notna(dati_sx["polizza"]) else "")
+                nuovo_danno = col_b.text_input("Tipologia / Descrizione Danno", value=str(dati_sx["danno"]) if pd.notna(dati_sx["danno"]) else "")
+                nuovi_allegati = col_b.text_input("Link Cartella Drive / Allegati", value=str(dati_sx["allegati"]) if pd.notna(dati_sx["allegati"]) else "")
+                
+                if st.button("💾 Salva Modifiche Sotto-Scheda"):
+                    df_sinistri.at[idx_sx, "stato"] = nuovo_stato
+                    df_sinistri.at[idx_sx, "polizza"] = nuova_polizza
+                    df_sinistri.at[idx_sx, "danno"] = nuovo_danno
+                    df_sinistri.at[idx_sx, "allegati"] = nuovi_allegati
+                    salva_dati("sinistri", df_sinistri)
+                    st.success("Sotto-scheda sinistro aggiornata su Google Sheets!")
+                    st.rerun()
+
+                # Diario Messaggi / Note nella colonna 'messaggi'
+                st.markdown("---")
+                st.markdown("##### 💬 Diario Messaggi & Aggiornamenti")
+                storico_msg = str(dati_sx["messaggi"]) if pd.notna(dati_sx["messaggi"]) and str(dati_sx["messaggi"]).strip() != "" else ""
+                if storico_msg:
+                    st.text_area("Cronologia salvata:", value=storico_msg, height=150, disabled=True)
                 else:
-                    for idx_c, cond in enumerate(dati["condomini"]):
-                        col_cond1, col_cond2 = st.columns([3, 1])
-                        with col_cond1:
-                            st.markdown(f"📍 **{cond}**")
-                        with col_cond2:
-                            # Pulsante per aprire direttamente la pratica associata
-                            if st.button(f"🚨 Apri Pratica", key=f"btn_apri_{studio}_{idx_c}"):
-                                st.session_state.precompila_studio = studio
-                                st.session_state.precompila_condominio = cond
-                                st.success(f"Condominio '{cond}' selezionato! Vai alla scheda 'Pratiche Sinistri' per completare.")
-                                st.rerun()
-
-                st.divider()
-                with st.form(f"form_add_cond_{studio}", clear_on_submit=True):
-                    nuovo_cond_studio = st.text_input(f"Aggiungi un nuovo condominio a {studio}:", placeholder="Es. Via Properzio 4")
-                    btn_add_cond = st.form_submit_button("➕ Aggiungi Condominio")
-                    
-                    if btn_add_cond and nuovo_cond_studio:
-                        cond_add_clean = nuovo_cond_studio.strip()
-                        if cond_add_clean not in st.session_state.clienti[studio]["condomini"]:
-                            st.session_state.clienti[studio]["condomini"].append(cond_add_clean)
-                            st.success(f"Condominio '{cond_add_clean}' aggiunto a {studio}!")
+                    st.caption("Nessun messaggio inserito per questa pratica.")
+                
+                with st.form(f"msg_{id_sx}", clear_on_submit=True):
+                    nuovo_msg = st.text_input("Scrivi nuovo aggiornamento / nota:")
+                    if st.form_submit_button("Aggiungi Messaggio"):
+                        if nuovo_msg.strip():
+                            timestamp = datetime.now().strftime("%d/%m/%Y %H:%M")
+                            riga_agg = f"[{timestamp}] {nuovo_msg.strip()}"
+                            testo_finale = f"{storico_msg}\n{riga_agg}".strip()
+                            df_sinistri.at[idx_sx, "messaggi"] = testo_finale
+                            salva_dati("sinistri", df_sinistri)
                             st.rerun()
+
+    # TAB B: NUOVO SINISTRO PER QUESTO CLIENTE
+    with tab_nuovo_sx:
+        st.subheader(f"Nuovo sinistro per {cliente_scelto}")
+        
+        # Suggerisce i condomini già inseriti nella scheda del cliente
+        lista_cond_suggeriti = [c.strip() for c in str(dati_cli["condomini"]).split(",") if c.strip()]
+        
+        with st.form("form_nuovo_sinistro", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            id_nuovo = c1.text_input("Codice / Numero Sinistro *", value=f"SX-{datetime.now().strftime('%y%m%d-%H%M')}")
+            if lista_cond_suggeriti:
+                cond_scelto = c1.selectbox("Condominio (dall'anagrafica cliente)", lista_cond_suggeriti + ["Altro (scrivi sotto)"])
+                cond_altro = c1.text_input("Oppure scrivi indirizzo condominio:")
+            else:
+                cond_scelto = ""
+                cond_altro = c1.text_input("Condominio / Indirizzo *")
+                
+            polizza_nuova = c2.text_input("Numero Polizza")
+            data_sx = c2.date_input("Data Sinistro", datetime.now())
+            stato_nuovo = c2.selectbox("Stato Iniziale", ["Inviata", "Aperta", "In lavorazione"])
+            
+            danno_nuovo = st.text_input("Descrizione Danno (es. Acqua condotta Int. 4)")
+            allegati_nuovi = st.text_input("Link Google Drive Documenti / Foto (opzionale)")
+            msg_iniziale = st.text_area("Nota iniziale:")
+            
+            if st.form_submit_button("💾 Crea Sotto-Scheda Sinistro"):
+                condominio_finale = cond_altro.strip() if (not cond_scelto or cond_scelto == "Altro (scrivi sotto)") else cond_scelto
+                if not condominio_finale:
+                    st.error("Indica il condominio interessato.")
+                else:
+                    primo_msg = f"[{datetime.now().strftime('%d/%m/%Y %H:%M')}] {msg_iniziale.strip()}" if msg_iniziale.strip() else ""
+                    nuovo_sx = pd.DataFrame([{
+                        "id": id_nuovo.strip(),
+                        "condominio": condominio_finale,
+                        "amministratore": cliente_scelto.strip(),
+                        "polizza": polizza_nuova.strip(),
+                        "danno": danno_nuovo.strip(),
+                        "stato": stato_nuovo,
+                        "data": str(data_sx),
+                        "allegati": allegati_nuovi.strip(),
+                        "messaggi": primo_msg
+                    }])
+                    df_sx_agg = pd.concat([df_sinistri, nuovo_sx], ignore_index=True)
+                    salva_dati("sinistri", df_sx_agg)
+                    st.success(f"Sinistro {id_nuovo} salvato nella scheda 'sinistri'!")
+                    st.rerun()
+
+# =========================================================
+# 3. VISTA GLOBALE TUTTI I SINISTRI
+# =========================================================
+elif menu == "📋 Tutti i Sinistri":
+    st.title("📋 Riepilogo Generale Sinistri")
+    if df_sinistri.empty:
+        st.info("Nessun sinistro presente.")
+    else:
+        st.dataframe(df_sinistri, use_container_width=True, hide_index=True)
